@@ -2,10 +2,17 @@ import { Redis } from "@upstash/redis";
 
 /* Liest die Zugangsdaten aus den Env-Variablen.
  * Die Vercel-Marketplace-Integration (Upstash Redis) spritzt sie automatisch ein.
- * Je nach Integration heissen sie KV_* oder UPSTASH_* – wir decken beide ab. */
+ * Je nach Integration tragen sie einen Präfix (z. B. Storage_) – wir decken die
+ * gängigen Namen ab. Wichtig: die REST-API-Variablen, nicht REDIS_URL. */
 const redis = new Redis({
-  url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN,
+  url:
+    process.env.Storage_KV_REST_API_URL ||
+    process.env.KV_REST_API_URL ||
+    process.env.UPSTASH_REDIS_REST_URL,
+  token:
+    process.env.Storage_KV_REST_API_TOKEN ||
+    process.env.KV_REST_API_TOKEN ||
+    process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
 const USERS_KEY = "timesheet:users";
