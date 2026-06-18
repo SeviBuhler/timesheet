@@ -100,6 +100,7 @@ export default function App() {
   const painting = useRef(false);
   const paintAdd = useRef(true);
   const bookedHit = useRef(false);
+  const lastPointer = useRef("mouse");
   const slotTimer = useRef(null);
   const pendingSlots = useRef(null);
   const msgTimer = useRef(null);
