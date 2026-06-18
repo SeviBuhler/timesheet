@@ -20,6 +20,9 @@ const TARGET_HOURS = 9;
 const MAX_PER_SLOT = 2;
 const MAX_USERS = 4;
 const COLORS = ["#10b981", "#3b82f6", "#f59e0b", "#ec4899"];
+const LOCKED_PERIODS = [
+  { start: 11 * 60 + 30, end: 12 * 60 },
+];
 
 const DAY_START = START_HOUR * 60;
 const DAY_END = END_HOUR * 60;
@@ -37,6 +40,11 @@ const uid = () =>
     ? crypto.randomUUID()
     : "u" + Date.now() + Math.random().toString(36).slice(2, 7);
 const GRID_COLS = "54px repeat(4, 1fr)";
+const isSlotLocked = (date, m) => LOCKED_PERIODS.some((r) => (!r.date || r.date === date) && m >= r.start && m < r.end);
+const isSlotLockedKey = (k) => {
+  const [date, rawMin] = k.split("|");
+  return isSlotLocked(date, Number(rawMin));
+};
 
 /* Telefon: nur Ziffern, optional ein führendes + */
 const sanitizePhone = (v) => {
@@ -493,7 +501,8 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
 
   useEffect(() => {
     if (editMode) {
-      setDraftKeys(liveKeys);
+      const lockedKeys = DAYS.flatMap((d) => SLOTS.filter((m) => isSlotLocked(d.date, m)).map((m) => slotKey(d.date, m)));
+      setDraftKeys(Array.from(new Set([...liveKeys, ...lockedKeys])).sort());
     } else {
       setDraftKeys(liveKeys);
       setShiftRemoveTarget(null);
@@ -532,6 +541,10 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
   const applyDraftSlot = useCallback((date, m) => {
     if (!me) return;
     const k = slotKey(date, m);
+    if (isSlotLocked(date, m)) {
+      flash("Dieser Zeitraum ist gesperrt.");
+      return;
+    }
     const liveHas = !!data.slots[k]?.includes(me);
     const draftHas = draftSet.has(k);
     const liveCount = data.slots[k]?.length || 0;
@@ -550,6 +563,7 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
   const onCellDown = (e, date, m) => {
     if (!editMode) return;
     if (!me) { flash("Wähle oben zuerst, wer du bist."); return; }
+    if (isSlotLocked(date, m)) { flash("Dieser Zeitraum ist gesperrt."); return; }
     const k = slotKey(date, m);
     const draftHas = draftSet.has(k);
     if (draftHas && bookedMine(k)) {
@@ -577,10 +591,12 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
     let done = 0;
     let skip = 0;
     let bookedSkip = 0;
+    let lockedSkip = 0;
     setDraftKeys((prevDraft) => {
       const next = new Set(prevDraft);
       for (let m = mVonValue; m < mBisValue; m += SLOT_MINUTES) {
         const k = slotKey(mDayValue, m);
+        if (isSlotLocked(mDayValue, m)) { lockedSkip++; continue; }
         const liveHas = !!data.slots[k]?.includes(me);
         const draftHas = next.has(k);
         const liveCount = data.slots[k]?.length || 0;
@@ -599,9 +615,9 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
       return Array.from(next).sort();
     });
     if (add)
-      flash(`${fmtH(done * SLOT_HOURS)} h vorgemerkt${skip ? `, ${fmtH(skip * SLOT_HOURS)} h übersprungen (voll)` : ""}.`);
+      flash(`${fmtH(done * SLOT_HOURS)} h vorgemerkt${skip ? `, ${fmtH(skip * SLOT_HOURS)} h übersprungen (voll)` : ""}${lockedSkip ? `, ${fmtH(lockedSkip * SLOT_HOURS)} h gesperrt` : ""}.`);
     else
-      flash(`${fmtH(done * SLOT_HOURS)} h vorgemerkt zum Austragen${bookedSkip ? `, ${bookedSkip} gebuchte Slot(s) übersprungen` : ""}.`);
+      flash(`${fmtH(done * SLOT_HOURS)} h vorgemerkt zum Austragen${bookedSkip ? `, ${bookedSkip} gebuchte Slot(s) übersprungen` : ""}${lockedSkip ? `, ${fmtH(lockedSkip * SLOT_HOURS)} h gesperrt` : ""}.`);
   };
 
   const saveEdit = async () => {
@@ -659,7 +675,7 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
                 </button>
                 <div className="hidden w-28 sm:block">
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
-                    <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, backgroundColor: reached ? "#10b981" : u.color }} />
+                    <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, backgroundColor: u.color }} />
                   </div>
                 </div>
                 <span className={`flex w-20 items-center justify-end gap-1 font-mono text-xs tabular-nums ${reached ? "text-emerald-600" : "text-slate-500"}`}>
@@ -712,6 +728,7 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
                 {DAYS.map((d) => {
                   const k = slotKey(d.date, m);
                   const arr = data.slots[k] || [];
+                  const locked = isSlotLocked(d.date, m);
                   const liveHas = me && arr.includes(me);
                   const draftHas = draftSet.has(k);
                   const mine = editMode ? draftHas : liveHas;
@@ -729,11 +746,13 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
                       onPointerDown={editMode ? (e) => onCellDown(e, d.date, m) : undefined}
                       style={{ touchAction: "pan-y", minHeight: 34 }}
                       className={`relative flex ${editMode ? "cursor-pointer" : "cursor-default"} items-center justify-center gap-1 rounded-md border transition ${
-                        mine ? "border-slate-800" : full ? "border-slate-200 bg-slate-100 cursor-not-allowed" : "border-slate-150 bg-white hover:border-slate-300"
+                        locked ? "cursor-not-allowed border-amber-300 bg-amber-50/70" : mine ? "border-slate-800" : full ? "border-slate-200 bg-slate-100 cursor-not-allowed" : "border-slate-150 bg-white hover:border-slate-300"
                       } ${isHour ? "" : "border-dashed"}`}
-                      title={booked ? "In diesem Slot liegt eine Buchung" : undefined}
+                      title={locked ? "Dieser Zeitraum ist gesperrt" : booked ? "In diesem Slot liegt eine Buchung" : undefined}
                     >
-                      {visibleIds.length === 0 ? (
+                      {locked ? (
+                        <Lock size={11} className="text-amber-600" />
+                      ) : visibleIds.length === 0 ? (
                         <Plus size={12} className="text-slate-200" />
                       ) : (
                         visibleIds.map((id) => {
@@ -757,6 +776,7 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
           ) : (
             <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-amber-500" /> Änderungen sind nur vorgemerkt, bis du speicherst.</span>
           )}
+          <span className="mt-1 inline-flex items-center gap-1"><Lock size={11} /> Gesperrt: 11:30–12:00 Uhr</span>
         </div>
       </section>
 
