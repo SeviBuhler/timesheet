@@ -45,6 +45,7 @@ const isSlotLockedKey = (k) => {
   const [date, rawMin] = k.split("|");
   return isSlotLocked(date, Number(rawMin));
 };
+const filterLockedSlotKeys = (keys) => keys.filter((k) => !isSlotLockedKey(k));
 
 /* Telefon: nur Ziffern, optional ein führendes + */
 const sanitizePhone = (v) => {
@@ -69,12 +70,12 @@ const store = {
       const { users, slotsByUser, bookingsByTherapist } = await res.json();
       const slots = {};
       for (const [id, arr] of Object.entries(slotsByUser || {}))
-        for (const k of arr) (slots[k] = slots[k] || []).push(id);
+        for (const k of filterLockedSlotKeys(arr || [])) (slots[k] = slots[k] || []).push(id);
       return { users: users || [], slots, bookings: bookingsByTherapist || {} };
     } catch (e) { console.warn("load fehlgeschlagen – nur im Speicher", e); return null; }
   },
   async addUser(user) { try { await post({ action: "addUser", user }); } catch (e) { console.error(e); } },
-  async saveUserSlots(userId, slots) { try { await post({ action: "setUserSlots", userId, slots }); } catch (e) { console.error(e); } },
+  async saveUserSlots(userId, slots) { try { await post({ action: "setUserSlots", userId, slots: filterLockedSlotKeys(slots || []) }); } catch (e) { console.error(e); } },
   async removeUser(userId) { try { await post({ action: "removeUser", userId }); } catch (e) { console.error(e); } },
   async reset() { try { await post({ action: "reset" }); } catch (e) { console.error(e); } },
   async book(therapistId, sk, name, phone) {
@@ -623,8 +624,10 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
   const saveEdit = async () => {
     if (!me || saving) return;
     setSaving(true);
-    const removedBookedKeys = liveKeys.filter((k) => !draftSet.has(k) && bookedMine(k));
-    await onSaveSlots(me, draftKeys, removedBookedKeys);
+    const nextKeys = filterLockedSlotKeys(draftKeys);
+    const nextSet = new Set(nextKeys);
+    const removedBookedKeys = liveKeys.filter((k) => !nextSet.has(k) && bookedMine(k));
+    await onSaveSlots(me, nextKeys, removedBookedKeys);
     setSaving(false);
     setShiftRemoveTarget(null);
     setEditMode(false);
