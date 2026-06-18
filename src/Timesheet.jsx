@@ -93,19 +93,14 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [msg, setMsg] = useState(null);
-  const [shiftRemoveTarget, setShiftRemoveTarget] = useState(null); // {date, m}
 
   const dataRef = useRef(data);
   const meRef = useRef(me);
-  const painting = useRef(false);
-  const paintAdd = useRef(true);
-  const bookedHit = useRef(false);
-  const lastPointer = useRef("mouse");
-  const slotTimer = useRef(null);
-  const pendingSlots = useRef(null);
   const msgTimer = useRef(null);
+  const editingRef = useRef(false);
   useEffect(() => { dataRef.current = data; }, [data]);
   useEffect(() => { meRef.current = me; }, [me]);
+  const handleEditingChange = useCallback((editing) => { editingRef.current = editing; }, []);
 
   const flash = useCallback((text) => {
     setMsg(text);
@@ -120,19 +115,6 @@ export default function App() {
   }, []);
   const go = (p) => { location.hash = p === "shifts" ? "#schichten" : "#buchen"; setPage(p); };
 
-  const myKeys = (d, id) => Object.keys(d.slots).filter((k) => d.slots[k].includes(id));
-  const flushSlots = useCallback(async () => {
-    clearTimeout(slotTimer.current);
-    const p = pendingSlots.current;
-    pendingSlots.current = null;
-    if (p) await store.saveUserSlots(p.userId, p.keys);
-  }, []);
-  const scheduleSaveSlots = useCallback((userId, next) => {
-    pendingSlots.current = { userId, keys: myKeys(next, userId) };
-    clearTimeout(slotTimer.current);
-    slotTimer.current = setTimeout(flushSlots, 350);
-  }, [flushSlots]);
-
   const mutate = useCallback((fn, onCommit) => {
     setData((prev) => {
       const next = fn(prev);
@@ -143,9 +125,37 @@ export default function App() {
     });
   }, []);
 
+  const saveUserSlots = useCallback(async (userId, nextKeys, removedBookedKeys = []) => {
+    for (const k of removedBookedKeys) await store.cancelBooking(userId, k);
+    mutate((prev) => {
+      const slots = {};
+      for (const [k, arr] of Object.entries(prev.slots)) {
+        const filtered = arr.filter((x) => x !== userId);
+        if (filtered.length) slots[k] = filtered;
+      }
+      for (const k of nextKeys) {
+        const arr = slots[k] ? [...slots[k]] : [];
+        if (!arr.includes(userId)) arr.push(userId);
+        slots[k] = arr;
+      }
+      const bookings = { ...(prev.bookings || {}) };
+      if (removedBookedKeys.length && bookings[userId]) {
+        const nextBookings = { ...bookings[userId] };
+        for (const k of removedBookedKeys) delete nextBookings[k];
+        if (Object.keys(nextBookings).length) bookings[userId] = nextBookings;
+        else delete bookings[userId];
+      }
+      return { ...prev, slots, bookings };
+    });
+    await store.saveUserSlots(userId, nextKeys);
+  }, [mutate]);
+
   const refresh = useCallback(async () => {
+    if (editingRef.current) {
+      flash("Bitte zuerst speichern oder abbrechen.");
+      return;
+    }
     setSyncing(true);
-    await flushSlots();
     const d = await store.load();
     if (d) {
       setData(d); dataRef.current = d;
@@ -153,7 +163,7 @@ export default function App() {
       if (m && !d.users.some((u) => u.id === m)) { setMe(null); meStore.save(null); }
     }
     setSyncing(false);
-  }, [flushSlots]);
+  }, [flash]);
 
   useEffect(() => {
     (async () => {
@@ -166,22 +176,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const onFocus = () => { if (!painting.current) refresh(); };
+    const onFocus = () => { if (!editingRef.current) refresh(); };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh]);
-
-  useEffect(() => {
-    const up = () => {
-      painting.current = false;
-      if (bookedHit.current) {
-        bookedHit.current = false;
-        flash("Gebuchte Slots wurden nicht entfernt – zum Stornieren einzeln anklicken.");
-      }
-    };
-    window.addEventListener("pointerup", up);
-    return () => window.removeEventListener("pointerup", up);
-  }, [flash]);
 
   const userHours = (d, id) =>
     Object.values(d.slots).reduce((acc, arr) => acc + (arr.includes(id) ? SLOT_HOURS : 0), 0);
@@ -226,86 +224,6 @@ export default function App() {
     setMe(null); meStore.save(null);
   };
 
-  /* ---- Schicht-Slots setzen ---- */
-  const applyPaint = useCallback((date, m) => {
-    const id = meRef.current;
-    if (!id) return;
-    mutate(
-      (prev) => {
-        const k = slotKey(date, m);
-        const arr = prev.slots[k] ? [...prev.slots[k]] : [];
-        const has = arr.includes(id);
-        if (paintAdd.current) {
-          if (has) return prev;
-          if (arr.length >= MAX_PER_SLOT) { flash(`Slot voll – max. ${MAX_PER_SLOT} gleichzeitig.`); return prev; }
-          arr.push(id);
-        } else {
-          if (!has) return prev;
-          if (isBooked(prev, id, k)) { bookedHit.current = true; return prev; } // Buchung beim Ziehen schützen
-          arr.splice(arr.indexOf(id), 1);
-        }
-        const slots = { ...prev.slots };
-        if (arr.length) slots[k] = arr; else delete slots[k];
-        return { ...prev, slots };
-      },
-      (next) => scheduleSaveSlots(id, next)
-    );
-  }, [mutate, flash, scheduleSaveSlots]);
-
-  const onCellDown = (e, date, m) => {
-    if (!meRef.current) { flash("Wähle oben zuerst, wer du bist."); return; }
-    const k = slotKey(date, m);
-    const arr = dataRef.current.slots[k] || [];
-    const has = arr.includes(meRef.current);
-    if (has && isBooked(dataRef.current, meRef.current, k)) { // gebuchten Slot entfernen → Warn-Popup
-      setShiftRemoveTarget({ date, m });
-      return;
-    }
-    const isTouch = e.pointerType === "touch";
-    if (!isTouch) e.preventDefault();
-    paintAdd.current = !has;
-    painting.current = !isTouch;
-    applyPaint(date, m);
-  };
-  const onGridMove = (e) => {
-    if (!painting.current) return;
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const cell = el && el.closest("[data-cell]");
-    if (cell) applyPaint(cell.dataset.date, Number(cell.dataset.min));
-  };
-
-  const manual = (mDay, mVon, mBis, add) => {
-    if (!me) return flash("Wähle oben zuerst, wer du bist.");
-    if (mVon >= mBis) return flash("„Von“ muss kleiner als „Bis“ sein.");
-    let done = 0, skip = 0, bookedSkip = 0;
-    mutate(
-      (prev) => {
-        const slots = { ...prev.slots };
-        for (let m = mVon; m < mBis; m += SLOT_MINUTES) {
-          const k = slotKey(mDay, m);
-          const arr = slots[k] ? [...slots[k]] : [];
-          const has = arr.includes(me);
-          if (add) {
-            if (has) continue;
-            if (arr.length >= MAX_PER_SLOT) { skip++; continue; }
-            arr.push(me); done++;
-          } else {
-            if (!has) continue;
-            if (isBooked(prev, me, k)) { bookedSkip++; continue; } // gebuchte Slots nicht austragen
-            arr.splice(arr.indexOf(me), 1); done++;
-          }
-          if (arr.length) slots[k] = arr; else delete slots[k];
-        }
-        return { ...prev, slots };
-      },
-      (next) => scheduleSaveSlots(me, next)
-    );
-    if (add)
-      flash(`${fmtH(done * SLOT_HOURS)} h eingetragen${skip ? `, ${fmtH(skip * SLOT_HOURS)} h übersprungen (voll)` : ""}.`);
-    else
-      flash(`${fmtH(done * SLOT_HOURS)} h ausgetragen${bookedSkip ? `, ${bookedSkip} gebuchte Slot(s) übersprungen` : ""}.`);
-  };
-
   /* ---- Buchungen ---- */
   const book = async (therapistId, sk, name, phone) => {
     const r = await store.book(therapistId, sk, name, phone);
@@ -335,31 +253,9 @@ export default function App() {
     flash("Buchung storniert.");
   };
 
-  /* ---- Schicht-Slot mit Buchung entfernen (bestätigt) ---- */
-  const confirmShiftRemove = async () => {
-    const { date, m } = shiftRemoveTarget;
-    const k = slotKey(date, m);
-    await store.cancelBooking(me, k);
-    mutate(
-      (prev) => {
-        const arr = (prev.slots[k] || []).filter((x) => x !== me);
-        const slots = { ...prev.slots };
-        if (arr.length) slots[k] = arr; else delete slots[k];
-        const bookings = { ...(prev.bookings || {}) };
-        if (bookings[me]) { const t = { ...bookings[me] }; delete t[k]; bookings[me] = t; }
-        return { ...prev, slots, bookings };
-      },
-      (next) => scheduleSaveSlots(me, next)
-    );
-    setShiftRemoveTarget(null);
-    flash("Schicht entfernt & Buchung storniert.");
-  };
-
   /* ---------------------------------------------------------------- */
   if (loading)
     return <div className="p-10 text-center text-slate-400 font-mono text-sm">lädt …</div>;
-
-  const removeBooking = shiftRemoveTarget ? data.bookings?.[me]?.[slotKey(shiftRemoveTarget.date, shiftRemoveTarget.m)] : null;
 
   return (
     <div className="min-h-screen w-full bg-slate-50 text-slate-800 px-4 py-6 sm:px-6">
@@ -387,31 +283,10 @@ export default function App() {
           <ShiftView
             data={data} me={me} userHours={userHours}
             onCreate={createUser} onSelectMe={selectMe} onRemove={removeUser}
-            onCellDown={onCellDown} onGridMove={onGridMove} onManual={manual} onReset={resetAll}
+            onSaveSlots={saveUserSlots} onReset={resetAll} flash={flash} onEditingChange={handleEditingChange}
           />
         )}
       </div>
-
-      {/* Warn-Popup: Schicht-Slot mit Buchung entfernen */}
-      {shiftRemoveTarget && (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 px-4" onClick={() => setShiftRemoveTarget(null)}>
-          <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <div className="mb-3 flex items-center gap-2">
-              <AlertTriangle size={18} className="text-amber-500" />
-              <h3 className="text-base font-semibold text-slate-900">Slot ist gebucht</h3>
-            </div>
-            <p className="text-sm text-slate-600">
-              {dayLabel(shiftRemoveTarget.date)} · {fmt(shiftRemoveTarget.m)}–{fmt(shiftRemoveTarget.m + SLOT_MINUTES)} hat eine Buchung
-              {removeBooking ? <> von <b className="text-slate-800">{removeBooking.name}</b> ({removeBooking.phone})</> : null}.
-              Wenn du deine Schicht hier entfernst, wird diese Buchung <b>storniert</b>.
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button onClick={() => setShiftRemoveTarget(null)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Behalten</button>
-              <button onClick={confirmShiftRemove} className="rounded-lg bg-rose-600 px-3 py-2 text-sm font-medium text-white hover:bg-rose-500">Entfernen &amp; stornieren</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {msg && (
         <div className="fixed bottom-5 left-1/2 -translate-x-1/2 rounded-lg bg-slate-900 px-4 py-2 text-sm text-white shadow-lg">{msg}</div>
@@ -590,16 +465,171 @@ function BookingView({ data, onBook, onCancel }) {
 /* ================================================================== *
  *  SEITE 2 — SCHICHTEN EINTRAGEN
  * ================================================================== */
-function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onCellDown, onGridMove, onManual, onReset }) {
+function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSaveSlots, onReset, flash, onEditingChange }) {
   const [name, setName] = useState("");
   const [mDay, setMDay] = useState(DAYS[0].date);
   const [mVon, setMVon] = useState(DAY_START);
   const [mBis, setMBis] = useState(DAY_START + TARGET_HOURS * 60);
+  const [editMode, setEditMode] = useState(false);
+  const [draftKeys, setDraftKeys] = useState([]);
+  const [shiftRemoveTarget, setShiftRemoveTarget] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  const painting = useRef(false);
+  const paintAdd = useRef(true);
+  const bookedHit = useRef(false);
 
   const meUser = data.users.find((u) => u.id === me);
   const allDone = data.users.length > 0 && data.users.every((u) => userHours(data, u.id) >= TARGET_HOURS);
   const submit = () => { onCreate(name); setName(""); };
-  const bookedMine = (k) => !!(me && data.bookings?.[me]?.[k]);
+  const liveKeys = me ? Object.keys(data.slots).filter((k) => data.slots[k].includes(me)).sort() : [];
+  const draftSet = new Set(draftKeys);
+  const bookedMine = useCallback((k) => !!(me && data.bookings?.[me]?.[k]), [data.bookings, me]);
+
+  useEffect(() => {
+    onEditingChange(editMode);
+    return () => onEditingChange(false);
+  }, [editMode, onEditingChange]);
+
+  useEffect(() => {
+    if (editMode) {
+      setDraftKeys(liveKeys);
+    } else {
+      setDraftKeys(liveKeys);
+      setShiftRemoveTarget(null);
+      painting.current = false;
+      bookedHit.current = false;
+    }
+  }, [editMode, liveKeys.join("|")]);
+
+  useEffect(() => {
+    const up = () => {
+      painting.current = false;
+      if (bookedHit.current) {
+        bookedHit.current = false;
+        flash("Gebuchte Slots wurden nicht entfernt – erst speichern, dann wird storniert.");
+      }
+    };
+    window.addEventListener("pointerup", up);
+    return () => window.removeEventListener("pointerup", up);
+  }, [flash]);
+
+  const startEdit = () => {
+    if (!me) return;
+    setDraftKeys(liveKeys);
+    setShiftRemoveTarget(null);
+    setEditMode(true);
+  };
+
+  const cancelEdit = () => {
+    setDraftKeys(liveKeys);
+    setShiftRemoveTarget(null);
+    painting.current = false;
+    bookedHit.current = false;
+    setEditMode(false);
+  };
+
+  const applyDraftSlot = useCallback((date, m) => {
+    if (!me) return;
+    const k = slotKey(date, m);
+    const liveHas = !!data.slots[k]?.includes(me);
+    const draftHas = draftSet.has(k);
+    const liveCount = data.slots[k]?.length || 0;
+
+    if (paintAdd.current) {
+      if (draftHas) return;
+      if (!liveHas && liveCount >= MAX_PER_SLOT) { flash(`Slot voll – max. ${MAX_PER_SLOT} gleichzeitig.`); return; }
+      setDraftKeys((prev) => Array.from(new Set([...prev, k])).sort());
+    } else {
+      if (!draftHas) return;
+      if (bookedMine(k)) { bookedHit.current = true; return; }
+      setDraftKeys((prev) => prev.filter((key) => key !== k));
+    }
+  }, [bookedMine, data.slots, draftSet, flash, me]);
+
+  const onCellDown = (e, date, m) => {
+    if (!editMode) return;
+    if (!me) { flash("Wähle oben zuerst, wer du bist."); return; }
+    const k = slotKey(date, m);
+    const draftHas = draftSet.has(k);
+    if (draftHas && bookedMine(k)) {
+      setShiftRemoveTarget({ date, m });
+      return;
+    }
+    const isTouch = e.pointerType === "touch";
+    if (!isTouch) e.preventDefault();
+    paintAdd.current = !draftHas;
+    painting.current = !isTouch;
+    applyDraftSlot(date, m);
+  };
+
+  const onGridMove = (e) => {
+    if (!editMode || !painting.current) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const cell = el && el.closest("[data-cell]");
+    if (cell) applyDraftSlot(cell.dataset.date, Number(cell.dataset.min));
+  };
+
+  const onManual = (mDayValue, mVonValue, mBisValue, add) => {
+    if (!editMode) return flash("Zum Bearbeiten erst auf „Bearbeiten“ tippen.");
+    if (!me) return flash("Wähle oben zuerst, wer du bist.");
+    if (mVonValue >= mBisValue) return flash("„Von“ muss kleiner als „Bis“ sein.");
+    let done = 0;
+    let skip = 0;
+    let bookedSkip = 0;
+    setDraftKeys((prevDraft) => {
+      const next = new Set(prevDraft);
+      for (let m = mVonValue; m < mBisValue; m += SLOT_MINUTES) {
+        const k = slotKey(mDayValue, m);
+        const liveHas = !!data.slots[k]?.includes(me);
+        const draftHas = next.has(k);
+        const liveCount = data.slots[k]?.length || 0;
+        if (add) {
+          if (draftHas) continue;
+          if (!liveHas && liveCount >= MAX_PER_SLOT) { skip++; continue; }
+          next.add(k);
+          done++;
+        } else {
+          if (!draftHas) continue;
+          if (bookedMine(k)) { bookedSkip++; continue; }
+          next.delete(k);
+          done++;
+        }
+      }
+      return Array.from(next).sort();
+    });
+    if (add)
+      flash(`${fmtH(done * SLOT_HOURS)} h vorgemerkt${skip ? `, ${fmtH(skip * SLOT_HOURS)} h übersprungen (voll)` : ""}.`);
+    else
+      flash(`${fmtH(done * SLOT_HOURS)} h vorgemerkt zum Austragen${bookedSkip ? `, ${bookedSkip} gebuchte Slot(s) übersprungen` : ""}.`);
+  };
+
+  const saveEdit = async () => {
+    if (!me || saving) return;
+    setSaving(true);
+    const removedBookedKeys = liveKeys.filter((k) => !draftSet.has(k) && bookedMine(k));
+    await onSaveSlots(me, draftKeys, removedBookedKeys);
+    setSaving(false);
+    setShiftRemoveTarget(null);
+    setEditMode(false);
+    flash("Schichten gespeichert.");
+  };
+
+  const confirmShiftRemove = () => {
+    if (!shiftRemoveTarget) return;
+    const { date, m } = shiftRemoveTarget;
+    const k = slotKey(date, m);
+    setDraftKeys((prev) => prev.filter((key) => key !== k));
+    bookedHit.current = true;
+    setShiftRemoveTarget(null);
+  };
+
+  const displayedHourCount = (k) => {
+    if (!editMode) return data.slots[k]?.length || 0;
+    const liveHas = !!data.slots[k]?.includes(me);
+    const draftHas = draftSet.has(k);
+    return (data.slots[k]?.length || 0) + (draftHas && !liveHas ? 1 : 0) - (!draftHas && liveHas ? 1 : 0);
+  };
 
   return (
     <>
@@ -611,9 +641,19 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onCell
       </div>
 
       <section className="mb-5 rounded-xl border border-slate-200 bg-white p-4">
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-semibold text-slate-700">Wer bist du?</h2>
-          {meUser && <span className="font-mono text-xs text-slate-500">aktiv: <b style={{ color: meUser.color }}>{meUser.name}</b></span>}
+          <div className="flex items-center gap-2">
+            {meUser && <span className="font-mono text-xs text-slate-500">aktiv: <b style={{ color: meUser.color }}>{meUser.name}</b></span>}
+            {!editMode ? (
+              <button onClick={startEdit} disabled={!me} className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40">Bearbeiten</button>
+            ) : (
+              <>
+                <button onClick={cancelEdit} disabled={saving} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Abbrechen</button>
+                <button onClick={saveEdit} disabled={saving} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40">{saving ? "Speichere …" : "Speichern"}</button>
+              </>
+            )}
+          </div>
         </div>
         <div className="flex flex-col gap-2">
           {data.users.map((u) => {
@@ -623,7 +663,7 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onCell
             const active = u.id === me;
             return (
               <div key={u.id} className={`flex items-center gap-3 rounded-lg border px-3 py-2 transition ${active ? "border-slate-800 bg-slate-50" : "border-slate-200"}`}>
-                <button onClick={() => onSelectMe(u.id)} className="flex min-w-0 flex-1 items-center gap-2 text-left" title="Als aktive Person wählen">
+                <button onClick={() => !editMode && onSelectMe(u.id)} disabled={editMode} className="flex min-w-0 flex-1 items-center gap-2 text-left disabled:cursor-not-allowed disabled:opacity-60" title={editMode ? "Während des Bearbeitens gesperrt" : "Als aktive Person wählen"}>
                   <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-[10px] font-bold text-white" style={{ backgroundColor: u.color }}>{u.name.slice(0, 2).toUpperCase()}</span>
                   <span className="truncate text-sm font-medium">{u.name}</span>
                   {active && <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-semibold text-white">das bist du</span>}
@@ -667,22 +707,31 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onCell
                 {DAYS.map((d) => {
                   const k = slotKey(d.date, m);
                   const arr = data.slots[k] || [];
-                  const mine = me && arr.includes(me);
-                  const full = arr.length >= MAX_PER_SLOT && !mine;
+                  const liveHas = me && arr.includes(me);
+                  const draftHas = draftSet.has(k);
+                  const mine = editMode ? draftHas : liveHas;
+                  const count = displayedHourCount(k);
+                  const full = count >= MAX_PER_SLOT && !mine;
                   const booked = mine && bookedMine(k);
+                  const visibleIds = editMode
+                    ? [
+                        ...arr.filter((id) => id !== me),
+                        ...(draftHas ? [me] : []),
+                      ].filter(Boolean)
+                    : arr;
                   return (
                     <div key={d.date + m} data-cell data-date={d.date} data-min={m}
-                      onPointerDown={(e) => onCellDown(e, d.date, m)}
+                      onPointerDown={editMode ? (e) => onCellDown(e, d.date, m) : undefined}
                       style={{ touchAction: "pan-y", minHeight: 34 }}
-                      className={`relative flex cursor-pointer items-center justify-center gap-1 rounded-md border transition ${
+                      className={`relative flex ${editMode ? "cursor-pointer" : "cursor-default"} items-center justify-center gap-1 rounded-md border transition ${
                         mine ? "border-slate-800" : full ? "border-slate-200 bg-slate-100 cursor-not-allowed" : "border-slate-150 bg-white hover:border-slate-300"
                       } ${isHour ? "" : "border-dashed"}`}
                       title={booked ? "In diesem Slot liegt eine Buchung" : undefined}
                     >
-                      {arr.length === 0 ? (
+                      {visibleIds.length === 0 ? (
                         <Plus size={12} className="text-slate-200" />
                       ) : (
-                        arr.map((id) => {
+                        visibleIds.map((id) => {
                           const u = data.users.find((x) => x.id === id);
                           if (!u) return null;
                           return <span key={id} className="grid h-5 w-5 place-items-center rounded-full text-[9px] font-bold text-white" style={{ backgroundColor: u.color }} title={u.name}>{u.name.slice(0, 2).toUpperCase()}</span>;
@@ -698,7 +747,11 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onCell
           })}
         </div>
         <div className="mt-3 font-mono text-[11px] text-slate-400">
-          <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-amber-500" /> Slot mit Buchung – Entfernen warnt und storniert</span>
+          {!editMode ? (
+            <span className="inline-flex items-center gap-1"><Lock size={11} /> Board gesperrt – erst auf „Bearbeiten“ tippen</span>
+          ) : (
+            <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-amber-500" /> Änderungen sind nur vorgemerkt, bis du speicherst.</span>
+          )}
         </div>
       </section>
 
@@ -707,24 +760,24 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onCell
         <div className="flex flex-wrap items-end gap-3">
           <label className="flex flex-col gap-1">
             <span className="font-mono text-[11px] text-slate-400">Tag</span>
-            <select value={mDay} onChange={(e) => setMDay(e.target.value)} className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-slate-800">
+            <select value={mDay} onChange={(e) => setMDay(e.target.value)} disabled={!editMode} className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm outline-none focus:border-slate-800 disabled:cursor-not-allowed disabled:opacity-60">
               {DAYS.map((d) => <option key={d.date} value={d.date}>{d.wd} {d.dm}</option>)}
             </select>
           </label>
           <label className="flex flex-col gap-1">
             <span className="font-mono text-[11px] text-slate-400">Von</span>
-            <select value={mVon} onChange={(e) => setMVon(Number(e.target.value))} className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm font-mono outline-none focus:border-slate-800">
+            <select value={mVon} onChange={(e) => setMVon(Number(e.target.value))} disabled={!editMode} className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm font-mono outline-none focus:border-slate-800 disabled:cursor-not-allowed disabled:opacity-60">
               {SLOTS.map((m) => <option key={m} value={m}>{fmt(m)}</option>)}
             </select>
           </label>
           <label className="flex flex-col gap-1">
             <span className="font-mono text-[11px] text-slate-400">Bis</span>
-            <select value={mBis} onChange={(e) => setMBis(Number(e.target.value))} className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm font-mono outline-none focus:border-slate-800">
+            <select value={mBis} onChange={(e) => setMBis(Number(e.target.value))} disabled={!editMode} className="rounded-lg border border-slate-200 px-2 py-1.5 text-sm font-mono outline-none focus:border-slate-800 disabled:cursor-not-allowed disabled:opacity-60">
               {SLOTS.map((m) => m + SLOT_MINUTES).map((m) => <option key={m} value={m}>{fmt(m)}</option>)}
             </select>
           </label>
-          <button onClick={() => onManual(mDay, mVon, mBis, true)} className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700">Eintragen</button>
-          <button onClick={() => onManual(mDay, mVon, mBis, false)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Austragen</button>
+          <button onClick={() => onManual(mDay, mVon, mBis, true)} disabled={!editMode} className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40">Eintragen</button>
+          <button onClick={() => onManual(mDay, mVon, mBis, false)} disabled={!editMode} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Austragen</button>
         </div>
       </section>
 
@@ -736,6 +789,25 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onCell
         )}
         <button onClick={onReset} className="inline-flex items-center gap-1 font-mono text-xs text-slate-400 hover:text-rose-500"><Trash2 size={13} /> Zurücksetzen</button>
       </div>
+
+      {shiftRemoveTarget && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 px-4" onClick={() => setShiftRemoveTarget(null)}>
+          <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-center gap-2">
+              <AlertTriangle size={18} className="text-amber-500" />
+              <h3 className="text-base font-semibold text-slate-900">Slot ist gebucht</h3>
+            </div>
+            <p className="text-sm text-slate-600">
+              {dayLabel(shiftRemoveTarget.date)} · {fmt(shiftRemoveTarget.m)}–{fmt(shiftRemoveTarget.m + SLOT_MINUTES)} hat eine Buchung.
+              Wenn du diese Schicht entfernst, wird die Buchung beim Speichern storniert.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button onClick={() => setShiftRemoveTarget(null)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50">Behalten</button>
+              <button onClick={confirmShiftRemove} className="rounded-lg bg-rose-600 px-3 py-2 text-sm font-medium text-white hover:bg-rose-500">Entfernen</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
