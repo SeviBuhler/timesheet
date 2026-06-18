@@ -261,9 +261,10 @@ export default function App() {
       setShiftRemoveTarget({ date, m });
       return;
     }
-    e.preventDefault();
+    const isTouch = e.pointerType === "touch";
+    if (!isTouch) e.preventDefault();
     paintAdd.current = !has;
-    painting.current = true;
+    painting.current = !isTouch;
     applyPaint(date, m);
   };
   const onGridMove = (e) => {
@@ -605,7 +606,7 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onCell
       <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs text-slate-500">
         <span className="inline-flex items-center gap-1"><Clock size={13} /> Soll {TARGET_HOURS} h / Person</span>
         <span className="inline-flex items-center gap-1"><Users size={13} /> max. {MAX_PER_SLOT} gleichzeitig</span>
-        <span className="inline-flex items-center gap-1"><MousePointerClick size={13} /> klicken &amp; ziehen</span>
+        <span className="inline-flex items-center gap-1"><MousePointerClick size={13} /> Maus: ziehen · Handy: tippen</span>
         <span>25.–28.06.2026</span>
       </div>
 
@@ -672,7 +673,7 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onCell
                   return (
                     <div key={d.date + m} data-cell data-date={d.date} data-min={m}
                       onPointerDown={(e) => onCellDown(e, d.date, m)}
-                      style={{ touchAction: "none", minHeight: 34 }}
+                      style={{ touchAction: "pan-y", minHeight: 34 }}
                       className={`relative flex cursor-pointer items-center justify-center gap-1 rounded-md border transition ${
                         mine ? "border-slate-800" : full ? "border-slate-200 bg-slate-100 cursor-not-allowed" : "border-slate-150 bg-white hover:border-slate-300"
                       } ${isHour ? "" : "border-dashed"}`}
