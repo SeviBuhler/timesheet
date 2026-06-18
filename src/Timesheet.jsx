@@ -641,19 +641,8 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
       </div>
 
       <section className="mb-5 rounded-xl border border-slate-200 bg-white p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="mb-3">
           <h2 className="text-sm font-semibold text-slate-700">Wer bist du?</h2>
-          <div className="flex items-center gap-2">
-            {meUser && <span className="font-mono text-xs text-slate-500">aktiv: <b style={{ color: meUser.color }}>{meUser.name}</b></span>}
-            {!editMode ? (
-              <button onClick={startEdit} disabled={!me} className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40">Bearbeiten</button>
-            ) : (
-              <>
-                <button onClick={cancelEdit} disabled={saving} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Abbrechen</button>
-                <button onClick={saveEdit} disabled={saving} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40">{saving ? "Speichere …" : "Speichern"}</button>
-              </>
-            )}
-          </div>
         </div>
         <div className="flex flex-col gap-2">
           {data.users.map((u) => {
@@ -691,6 +680,22 @@ function ShiftView({ data, me, userHours, onCreate, onSelectMe, onRemove, onSave
       </section>
 
       <section className="mb-4 rounded-xl border border-slate-200 bg-white p-3 sm:p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+          <div className="flex items-center gap-2 font-mono text-xs text-slate-500">
+            {meUser ? <span>aktiv: <b style={{ color: meUser.color }}>{meUser.name}</b></span> : <span>aktiv: niemand gewählt</span>}
+            {!editMode && <span className="inline-flex items-center gap-1"><Lock size={11} /> Board gesperrt</span>}
+          </div>
+          <div className="flex items-center gap-2">
+            {!editMode ? (
+              <button onClick={startEdit} disabled={!me} className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40">Bearbeiten</button>
+            ) : (
+              <>
+                <button onClick={cancelEdit} disabled={saving} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Abbrechen</button>
+                <button onClick={saveEdit} disabled={saving} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40">{saving ? "Speichere …" : "Speichern"}</button>
+              </>
+            )}
+          </div>
+        </div>
         <div className="select-none" onPointerMove={onGridMove} style={{ display: "grid", gridTemplateColumns: GRID_COLS, gap: "4px" }}>
           <div />
           {DAYS.map((d) => (
